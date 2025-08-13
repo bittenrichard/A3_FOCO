@@ -36,13 +36,16 @@ const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_REDIRECT_URI
 );
 
+// --- IDs DAS TABELAS ---
 const USERS_TABLE_ID = '711';
 const VAGAS_TABLE_ID = '709';
 const CANDIDATOS_TABLE_ID = '710';
 const WHATSAPP_CANDIDATOS_TABLE_ID = '712';
 const AGENDAMENTOS_TABLE_ID = '713';
+const AVALIACOES_COMPORTAMENTAIS_TABLE_ID = '727'; // <<< NOVO ID DA TABELA
 const SALT_ROUNDS = 10;
 
+// --- INTERFACES ---
 interface BaserowJobPosting {
   id: number;
   titulo: string;
@@ -65,6 +68,7 @@ interface BaserowCandidate {
   idade?: number | null;
 }
 
+// --- ENDPOINTS DE AUTENTICAÇÃO ---
 app.post('/api/auth/signup', async (req: Request, res: Response) => {
   const { nome, empresa, telefone, email, password } = req.body;
   if (!email || !password || !nome) {
@@ -143,6 +147,7 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
   }
 });
 
+// --- ENDPOINTS DE GESTÃO DE USUÁRIO ---
 app.patch('/api/users/:userId/profile', async (req: Request, res: Response) => {
   const { userId } = req.params;
   const { nome, empresa, avatar_url } = req.body;
@@ -260,6 +265,7 @@ app.post('/api/upload-avatar', upload.single('avatar'), async (req: Request, res
   }
 });
 
+// --- ENDPOINTS DE GESTÃO DE VAGAS ---
 app.post('/api/jobs', async (req: Request, res: Response) => {
   const { titulo, descricao, endereco, requisitos_obrigatorios, requisitos_desejaveis, usuario } = req.body;
   if (!titulo || !descricao || !usuario || usuario.length === 0) {
@@ -313,6 +319,7 @@ app.delete('/api/jobs/:jobId', async (req: Request, res: Response) => {
   }
 });
 
+// --- ENDPOINTS DE GESTÃO DE CANDIDATOS ---
 app.patch('/api/candidates/:candidateId/status', async (req: Request, res: Response) => {
   const { candidateId } = req.params;
   const { status } = req.body;
@@ -335,6 +342,7 @@ app.patch('/api/candidates/:candidateId/status', async (req: Request, res: Respo
   }
 });
 
+// --- ENDPOINT DE BUSCA DE DADOS GERAIS ---
 app.get('/api/data/all/:userId', async (req: Request, res: Response) => {
   const { userId } = req.params;
   if (!userId) {
@@ -405,6 +413,7 @@ app.get('/api/data/all/:userId', async (req: Request, res: Response) => {
   }
 });
 
+// --- ENDPOINT DE UPLOAD DE CURRÍCULOS ---
 app.post('/api/upload-curriculums', upload.array('curriculumFiles'), async (req: Request, res: Response) => {
   const { jobId, userId } = req.body;
   const files = req.files as Express.Multer.File[];
@@ -489,6 +498,102 @@ app.post('/api/upload-curriculums', upload.array('curriculumFiles'), async (req:
   }
 });
 
+
+// ========================================================================
+// === NOVOS ENDPOINTS PARA O TESTE COMPORTAMENTAL ========================
+// ========================================================================
+
+// Endpoint 1: Iniciar um novo teste
+app.post('/api/behavioral-test/start', async (req: Request, res: Response) => {
+  const { candidateId, recruiterId } = req.body;
+
+  if (!candidateId || !recruiterId) {
+    return res.status(400).json({ error: 'ID do candidato e do recrutador são obrigatórios.' });
+  }
+
+  try {
+    const newAssessment = await baserowServer.post(AVALIACOES_COMPORTAMENTAIS_TABLE_ID, {
+      candidato: [parseInt(candidateId)],
+      recrutador: [parseInt(recruiterId)],
+      status: 'Pendente',
+    });
+
+    res.status(201).json({ success: true, assessmentId: newAssessment.id });
+  } catch (error: any) {
+    console.error('Erro ao iniciar teste comportamental (backend):', error);
+    res.status(500).json({ error: 'Não foi possível iniciar o teste.' });
+  }
+});
+
+// Endpoint 2: Submeter as respostas do teste
+app.post('/api/behavioral-test/submit', async (req: Request, res: Response) => {
+  const { assessmentId, answers } = req.body;
+  if (!assessmentId || !answers) {
+    return res.status(400).json({ error: 'ID da avaliação e respostas são obrigatórios.' });
+  }
+
+  try {
+    // 1. Atualiza o registro no Baserow com as respostas e o novo status
+    const updatedAssessment = await baserowServer.patch(AVALIACOES_COMPORTAMENTAIS_TABLE_ID, assessmentId, {
+      respostas: JSON.stringify(answers),
+      status: 'Em Processamento',
+      data_realizacao: new Date().toISOString(),
+    });
+
+    // 2. Dispara o Webhook para o n8n
+    // AVISO: A URL do webhook do n8n para o perfil comportamental precisa ser configurada.
+    // Estou usando um placeholder. Você deve substituir pela URL correta.
+    const N8N_BEHAVIORAL_WEBHOOK_URL = process.env.N8N_BEHAVIORAL_WEBHOOK_URL;
+    if (N8N_BEHAVIORAL_WEBHOOK_URL) {
+      const payload = {
+        assessmentId: updatedAssessment.id,
+        candidateId: updatedAssessment.candidato[0]?.id,
+        answers: answers
+      };
+
+      // Não esperamos a resposta do n8n para não bloquear o usuário (fire and forget)
+      fetch(N8N_BEHAVIORAL_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).catch(err => {
+        // Logamos o erro mas não impedimos a resposta de sucesso para o usuário
+        console.error(`[Webhook N8N Comportamental] Falha ao disparar para assessmentId ${assessmentId}:`, err);
+      });
+    } else {
+      console.warn("AVISO: A variável de ambiente N8N_BEHAVIORAL_WEBHOOK_URL não está configurada. O fluxo de IA não será iniciado.");
+    }
+
+    res.status(200).json({ success: true, message: 'Teste enviado para análise.' });
+
+  } catch (error: any) {
+    console.error('Erro ao submeter teste comportamental (backend):', error);
+    res.status(500).json({ error: 'Não foi possível submeter as respostas.' });
+  }
+});
+
+// Endpoint 3: Buscar o resultado de um teste
+app.get('/api/behavioral-test/result/:assessmentId', async (req: Request, res: Response) => {
+  const { assessmentId } = req.params;
+  if (!assessmentId) {
+    return res.status(400).json({ error: 'ID da avaliação é obrigatório.' });
+  }
+
+  try {
+    const result = await baserowServer.getRow(AVALIACOES_COMPORTAMENTAIS_TABLE_ID, parseInt(assessmentId));
+    if (!result) {
+      return res.status(404).json({ error: 'Avaliação não encontrada.' });
+    }
+    res.status(200).json({ success: true, data: result });
+  } catch (error: any) {
+    console.error('Erro ao buscar resultado do teste (backend):', error);
+    res.status(500).json({ error: 'Não foi possível buscar o resultado.' });
+  }
+});
+
+// ========================================================================
+// === ENDPOINTS DE AGENDAMENTO E GOOGLE CALENDAR =========================
+// ========================================================================
 app.get('/api/schedules/:userId', async (req: Request, res: Response) => {
   const { userId } = req.params;
   if (!userId) {
